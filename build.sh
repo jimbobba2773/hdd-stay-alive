@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Builds "HDD Stay Alive.app" and "HDD Stay Alive.zip" next to this script.
 # Works in a temp dir because the project volume's side files break code signing.
-VERSION="1.0"
+VERSION="1.1"
 REPO="jimbobba2773/hdd-stay-alive"   # GitHub "owner/repo" whose releases "Check for Updates" looks at
 SRC="${0:A:h}"
 NAME="HDD Stay Alive"

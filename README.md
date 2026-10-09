@@ -5,6 +5,7 @@ A small macOS menu bar app by GitSoft that keeps external drives (for example a 
 - Pick the drives to keep awake from the menu bar icon.
 - While active it prevents idle sleep and writes a tiny file to each chosen drive on a timer.
 - Starts active at launch, optional launch at login, optional "Only Show Active Drives".
+- "Keep awake for…" timer (30 minutes to 8 hours, or until turned off).
 
 ## Build
 
