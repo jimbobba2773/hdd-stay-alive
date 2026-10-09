@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     var timer: Timer?
     var active = false
+    var endDate: Date?        // when "Keep awake for…" runs out; nil = until turned off
+    var endTimer: Timer?
     var refreshing = false
 
     // Volumes the user picked (by path). Stored in UserDefaults.
@@ -83,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard active else { return }
         active = false
         timer?.invalidate(); timer = nil
+        endTimer?.invalidate(); endTimer = nil; endDate = nil
         if assertionID != 0 { IOPMAssertionRelease(assertionID); assertionID = 0 }
         if diskAssertionID != 0 { IOPMAssertionRelease(diskAssertionID); diskAssertionID = 0 }
         updateIcon(); rebuildMenu()
@@ -90,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Gives each selected drive some real I/O so it doesn't spin down.
     func ping() {
+        if let end = endDate, end <= Date() { stop(); return }   // backup in case the end timer fired late
         let method = self.method
         pingQueue.async { [selected] in
             for path in selected where FileManager.default.fileExists(atPath: path) {
@@ -207,11 +211,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func rebuildMenu() {
         let menu = NSMenu()
-        let toggle = NSMenuItem(title: active ? "Stay Alive: ON" : "Stay Alive: OFF",
+        var onTitle = "Stay Alive: ON"
+        if let end = endDate { onTitle += " (\(Self.format(end.timeIntervalSinceNow)) left)" }
+        let toggle = NSMenuItem(title: active ? onTitle : "Stay Alive: OFF",
                                 action: #selector(toggleActive), keyEquivalent: "")
         toggle.target = self
         toggle.state = active ? .on : .off
         menu.addItem(toggle)
+
+        let forMenu = NSMenu()
+        for (title, mins) in [("30 minutes", 30), ("1 hour", 60), ("2 hours", 120), ("4 hours", 240), ("8 hours", 480)] {
+            let i = NSMenuItem(title: title, action: #selector(keepAwakeFor(_:)), keyEquivalent: "")
+            i.target = self; i.tag = mins
+            forMenu.addItem(i)
+        }
+        forMenu.addItem(.separator())
+        let forever = NSMenuItem(title: "Until turned off", action: #selector(keepAwakeFor(_:)), keyEquivalent: "")
+        forever.target = self; forever.tag = 0
+        forever.state = active && endDate == nil ? .on : .off
+        forMenu.addItem(forever)
+        let forItem = NSMenuItem(title: "Keep awake for…", action: nil, keyEquivalent: "")
+        forItem.submenu = forMenu
+        menu.addItem(forItem)
         menu.addItem(.separator())
 
         let hideInactive = defaults.bool(forKey: "hideInactive")
@@ -301,6 +322,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func toggleActive() { active ? stop() : start() }
+
+    static func format(_ seconds: TimeInterval) -> String {
+        let m = max(1, Int((seconds / 60).rounded(.up)))
+        return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
+    }
+
+    /// Turns keep-awake on for a set time (tag = minutes), or until turned off (tag 0).
+    @objc func keepAwakeFor(_ s: NSMenuItem) {
+        endTimer?.invalidate(); endTimer = nil; endDate = nil
+        if s.tag > 0 {
+            let end = Date().addingTimeInterval(Double(s.tag) * 60)
+            endDate = end
+            endTimer = Timer.scheduledTimer(withTimeInterval: end.timeIntervalSinceNow, repeats: false) { [weak self] _ in
+                self?.stop()
+            }
+        }
+        if active { rebuildMenu() } else { start() }
+    }
 
     @objc func toggleVolume(_ s: NSMenuItem) {
         guard let p = s.representedObject as? String else { return }
