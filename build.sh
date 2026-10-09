@@ -16,7 +16,8 @@ cat > "$APP/Contents/Info.plist" <<PL
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>HDDStayAlive</string>
-<key>CFBundleIdentifier</key><string>local.hdd-stay-alive</string>
+<key>CFBundleIdentifier</key><string>com.gitsoft.hdd-stay-alive</string>
+<key>NSHumanReadableCopyright</key><string>© 2026 GitSoft</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleName</key><string>$NAME</string>
 <key>CFBundlePackageType</key><string>APPL</string>

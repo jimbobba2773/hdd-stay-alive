@@ -39,6 +39,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        // The app ID changed from local.hdd-stay-alive to com.gitsoft.hdd-stay-alive: carry old settings over once.
+        if defaults.object(forKey: "volumes") == nil, let old = UserDefaults(suiteName: "local.hdd-stay-alive") {
+            for key in ["volumes", "interval", "method", "hideInactive"] {
+                if let v = old.object(forKey: key) { defaults.set(v, forKey: key) }
+            }
+        }
         // Enable launch-at-login the first time the app runs; after that the menu toggle decides.
         if !defaults.bool(forKey: "loginConfigured") {
             defaults.set(true, forKey: "loginConfigured")
