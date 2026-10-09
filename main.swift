@@ -6,6 +6,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let defaults = UserDefaults.standard
     var assertionID: IOPMAssertionID = 0
+    var diskAssertionID: IOPMAssertionID = 0
+    let pingQueue = DispatchQueue(label: "pings", qos: .utility)
+    var readTargets: [String: String] = [:]   // volume path -> file we read from (pingQueue only)
+
+    enum Method: String, CaseIterable {
+        case read, write, both
+        var title: String {
+            switch self {
+            case .read: return "Read (no changes to the drive)"
+            case .write: return "Write a tiny file"
+            case .both: return "Read and write"
+            }
+        }
+    }
+    var method: Method {
+        get { Method(rawValue: defaults.string(forKey: "method") ?? "") ?? .read }
+        set { defaults.set(newValue.rawValue, forKey: "method") }
+    }
     var timer: Timer?
     var active = false
     var refreshing = false
@@ -46,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         IOPMAssertionCreateWithName("PreventUserIdleSystemSleep" as CFString,
                                     IOPMAssertionLevel(kIOPMAssertionLevelOn),
                                     "HDD Stay Alive" as CFString, &assertionID)
+        // Also stop macOS spinning down external disks under its own disk-sleep timer.
+        IOPMAssertionCreateWithName("PreventDiskIdle" as CFString,
+                                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                    "HDD Stay Alive (disks)" as CFString, &diskAssertionID)
         ping()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.ping() }
         updateIcon(); rebuildMenu()
@@ -56,27 +78,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         active = false
         timer?.invalidate(); timer = nil
         if assertionID != 0 { IOPMAssertionRelease(assertionID); assertionID = 0 }
+        if diskAssertionID != 0 { IOPMAssertionRelease(diskAssertionID); diskAssertionID = 0 }
         updateIcon(); rebuildMenu()
     }
 
-    /// Write a few bytes to each selected drive so it sees real I/O and doesn't spin down.
+    /// Gives each selected drive some real I/O so it doesn't spin down.
     func ping() {
-        let data = Data("\(Date().timeIntervalSince1970)".utf8)
-        DispatchQueue.global(qos: .utility).async { [selected] in
+        let method = self.method
+        pingQueue.async { [selected] in
             for path in selected where FileManager.default.fileExists(atPath: path) {
-                let url = URL(fileURLWithPath: path).appendingPathComponent(".hdd-stay-alive")
-                if let h = try? { () throws -> FileHandle in
-                    if !FileManager.default.fileExists(atPath: url.path) {
-                        FileManager.default.createFile(atPath: url.path, contents: nil)
-                    }
-                    return try FileHandle(forWritingTo: url)
-                }() {
-                    try? h.write(contentsOf: data)
-                    try? h.synchronize()   // fsync: forces a real write to the disk
-                    try? h.close()
-                }
+                var touched = false
+                if method != .write { touched = self.readTouch(path) }
+                // Write mode, or fall back to it when there was nothing to read (e.g. an empty drive).
+                if method != .read || !touched { self.writeTouch(path) }
             }
         }
+    }
+
+    func writeTouch(_ volume: String) {
+        let url = URL(fileURLWithPath: volume).appendingPathComponent(".hdd-stay-alive")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard let h = try? FileHandle(forWritingTo: url) else { return }
+        try? h.write(contentsOf: Data("\(Date().timeIntervalSince1970)".utf8))
+        try? h.synchronize()   // fsync: forces a real write to the disk
+        try? h.close()
+    }
+
+    /// Reads one block from a random spot in an existing file, bypassing the cache so the disk is really hit.
+    func readTouch(_ volume: String) -> Bool {
+        if let f = readTargets[volume], FileManager.default.fileExists(atPath: f), readBlock(f) { return true }
+        guard let f = findReadableFile(volume) else { return false }
+        readTargets[volume] = f
+        return readBlock(f)
+    }
+
+    func readBlock(_ file: String) -> Bool {
+        let fd = open(file, O_RDONLY)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        _ = fcntl(fd, F_NOCACHE, 1)
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_size > 0 else { return false }
+        let block = 4096
+        let offset = off_t(Int.random(in: 0...Int(st.st_size - 1)) / block * block)
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: block, alignment: block)
+        defer { buf.deallocate() }
+        return pread(fd, buf, block, offset) > 0
+    }
+
+    /// Finds a file to read from: prefers one of at least 1 MB, otherwise any non-empty file.
+    func findReadableFile(_ volume: String) -> String? {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        guard let e = FileManager.default.enumerator(at: URL(fileURLWithPath: volume),
+                                                     includingPropertiesForKeys: keys,
+                                                     options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+        var fallback: String?, seen = 0
+        for case let u as URL in e {
+            seen += 1
+            if seen > 3000 { break }
+            if e.level > 4 { e.skipDescendants(); continue }
+            guard let v = try? u.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
+                  let size = v.fileSize, size > 0 else { continue }
+            if size >= 1_048_576 { return u.path }
+            if fallback == nil { fallback = u.path }
+        }
+        return fallback
     }
 
     // MARK: UI
@@ -188,6 +256,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             i.target = self; i.tag = Int(s); i.state = interval == s ? .on : .off
             sub.addItem(i)
         }
+        let methodMenu = NSMenu()
+        for m in Method.allCases {
+            let i = NSMenuItem(title: m.title, action: #selector(setMethod(_:)), keyEquivalent: "")
+            i.target = self; i.representedObject = m.rawValue; i.state = method == m ? .on : .off
+            methodMenu.addItem(i)
+        }
+        let methodItem = NSMenuItem(title: "Keep-alive method", action: nil, keyEquivalent: "")
+        methodItem.submenu = methodMenu
+        menu.addItem(methodItem)
+
         let intervalItem = NSMenuItem(title: "Activity interval", action: nil, keyEquivalent: "")
         intervalItem.submenu = sub
         menu.addItem(intervalItem)
@@ -272,6 +350,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             a.informativeText = error.localizedDescription
             a.runModal()
         }
+        rebuildMenu()
+    }
+
+    @objc func setMethod(_ s: NSMenuItem) {
+        guard let raw = s.representedObject as? String, let m = Method(rawValue: raw) else { return }
+        method = m
+        if active { ping() }
         rebuildMenu()
     }
 
